@@ -1,4 +1,5 @@
 class ConversationKey {
+  final int? id;
   final String address;
   final String ownPrivateKey;
   final String ownPublicKey;
@@ -6,6 +7,7 @@ class ConversationKey {
   final String? sharedSecret;
 
   ConversationKey({
+    this.id,
     required this.address,
     required this.ownPrivateKey,
     required this.ownPublicKey,
@@ -15,6 +17,7 @@ class ConversationKey {
 
   Map<String, dynamic> toMap() {
     return {
+      'id': id,
       'address': address,
       'own_private_key': ownPrivateKey,
       'own_public_key': ownPublicKey,
@@ -25,6 +28,7 @@ class ConversationKey {
 
   factory ConversationKey.fromMap(Map<String, dynamic> map) {
     return ConversationKey(
+      id: map['id'],
       address: map['address'],
       ownPrivateKey: map['own_private_key'],
       ownPublicKey: map['own_public_key'],
@@ -34,15 +38,24 @@ class ConversationKey {
   }
 
   ConversationKey copyWith({
+    int? id,
+    String? address,
+    String? ownPrivateKey,
+    String? ownPublicKey,
     String? theirPublicKey,
     String? sharedSecret,
   }) {
     return ConversationKey(
-      address: address,
-      ownPrivateKey: ownPrivateKey,
-      ownPublicKey: ownPublicKey,
+      id: id ?? this.id,
+      address: address ?? this.address,
+      ownPrivateKey: ownPrivateKey ?? this.ownPrivateKey,
+      ownPublicKey: ownPublicKey ?? this.ownPublicKey,
       theirPublicKey: theirPublicKey ?? this.theirPublicKey,
       sharedSecret: sharedSecret ?? this.sharedSecret,
     );
+  }
+  @override
+  String toString() {
+    return 'ConversationKey(address: $address, ownPrivateKey: $ownPrivateKey, ownPublicKey: $ownPublicKey, theirPublicKey: $theirPublicKey, sharedSecret: $sharedSecret)';
   }
 }

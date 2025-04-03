@@ -8,7 +8,9 @@ import 'package:badges/badges.dart'; // أضف هذه المكتبة
 import '../controllers/message_controller.dart';
 import 'chat_screen.dart';
 import 'new_message_screen.dart';
-
+onBackgroundMessage(SmsMessage message) {
+  debugPrint("onBackgroundMessage called");
+}
 class ConversationsScreen extends StatefulWidget {
   const ConversationsScreen({Key? key}) : super(key: key);
 
@@ -21,14 +23,17 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   final Telephony _telephony = Telephony.instance;
   Map<String, List<SmsMessage>> _conversations = {};
   late Timer _timer;
-
+  String _message = "";
+  final telephony = Telephony.instance;
   @override
   void initState() {
     super.initState();
     _requestSmsPermission();
     _contactsFuture = FastContacts.getAllContacts();
     _loadConversations();
-    _startListening();
+    initPlatformState();
+
+    // _startListening();
   }
 
   @override
@@ -36,12 +41,38 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     _timer.cancel();
     super.dispose();
   }
-
-  void _startListening() {
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+  onMessage(SmsMessage message) async {
+    setState(() {
+      _message = message.body ?? "Error reading message body.";
+      print("🚀 تم استلام رسالة واردة: $_message");
       _listenForNewMessages();
+
     });
   }
+
+
+
+  // Platform messages are asynchronous, so we initialize in an async method.
+  Future<void> initPlatformState() async {
+    // Platform messages may fail, so we use a try/catch PlatformException.
+    // If the widget was removed from the tree while the asynchronous platform
+    // message was in flight, we want to discard the reply rather than calling
+    // setState to update our non-existent appearance.
+
+    bool? result = await telephony.requestPhoneAndSmsPermissions;
+
+    if (result != null && result) {
+      telephony.listenIncomingSms(
+          onNewMessage: onMessage, onBackgroundMessage: onBackgroundMessage);
+    }
+
+    if (!mounted) return;
+  }
+  // void _startListening() {
+  //   _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+  //     _listenForNewMessages();
+  //   });
+  // }
 
   Future<void> _requestSmsPermission() async {
     if (await Permission.sms.request().isGranted) {

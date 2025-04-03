@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:telephony/telephony.dart';
@@ -5,21 +8,27 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:path/path.dart';
 import 'package:flutter/foundation.dart';
 import 'package:pointycastle/export.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:telephony/telephony.dart';
 
 import '../models/message_model.dart';
 import '../models/conversation_key.dart';
 import '../utils/encryption.dart';
+import '../services/key_exchange_service.dart';
 
 class MessageController with ChangeNotifier {
   final Telephony _telephony = Telephony.instance;
+
   Database? _messagesDb;
   Database? _keysDb;
 
+  final KeyExchangeService _keyExchangeService = KeyExchangeService();
+
   MessageController() {
-    _initDatabases();
+    initDatabases();
   }
 
-  Future<void> _initDatabases() async {
+  Future<void> initDatabases() async {
     final messagesPath = await getDatabasesPath();
     final messagesDbPath = join(messagesPath, 'messages.db');
     _messagesDb = await openDatabase(
@@ -43,11 +52,13 @@ class MessageController with ChangeNotifier {
     final keysDbPath = join(keysPath, 'keys.db');
     _keysDb = await openDatabase(
       keysDbPath,
-      version: 1,
+      version: 2, // زيادة رقم الإصدار
       onCreate: (db, version) {
         db.execute('''
           CREATE TABLE conversation_keys(
-            address TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT,
+            sender_id TEXT,
             own_private_key TEXT,
             own_public_key TEXT,
             their_public_key TEXT,
@@ -55,34 +66,104 @@ class MessageController with ChangeNotifier {
           )
         ''');
       },
-    );
-
-    _telephony.listenIncomingSms(
-      onNewMessage: (SmsMessage message) async {
-        await processIncomingSms(message);
+      onUpgrade: (db, oldVersion, newVersion) {
+        if (oldVersion < 2) {
+          db.execute('ALTER TABLE conversation_keys ADD COLUMN sender_id TEXT');
+        }
       },
     );
+  }
+
+  Future<List<Map<String, dynamic>>> getMessages() async {
+    if (_messagesDb != null) {
+      List<Map<String, dynamic>> messages = await _messagesDb!.query('messages');
+      print("messages______${messages}");
+      return messages;
+    } else {
+      throw Exception('قاعدة البيانات غير مهيأة.');
+    }
+  }
+
+  void printMessages() async {
+    try {
+      List<Map<String, dynamic>> messages = await getMessages();
+      for (var message in messages) {
+        print('ID: ${message['id']}, Sender: ${message['sender']}, Content: ${message['content']}, Timestamp: ${message['timestamp']}, IsMe: ${message['isMe']}, IsEncrypted: ${message['isEncrypted']}');
+      }
+    } catch (e) {
+      print('حدث خطأ أثناء جلب البيانات: $e');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getConversationKeys() async {
+    if (_keysDb != null) {
+      List<Map<String, dynamic>> keys = await _keysDb!.query('conversation_keys');
+      print("keys______${keys}");
+      return keys;
+    } else {
+      throw Exception('قاعدة البيانات غير مهيأة.');
+    }
+  }
+
+  void printConversationKeys() async {
+    try {
+      List<Map<String, dynamic>> keys = await getConversationKeys();
+      for (var key in keys) {
+        print('ID: ${key['id']}, Address: ${key['address']}, Sender ID: ${key['sender_id']}, Own Private Key: ${key['own_private_key']}, Own Public Key: ${key['own_public_key']}, Their Public Key: ${key['their_public_key']}, Shared Secret: ${key['shared_secret']}');
+      }
+    } catch (e) {
+      print('حدث خطأ أثناء جلب البيانات: $e');
+    }
+  }
+
+  Future<List<SmsMessage>> getAllMessages() async {
+    if (await Permission.sms.status.isGranted) {
+      List<SmsMessage> inbox = await _telephony.getInboxSms();
+      List<SmsMessage> sent = await _telephony.getSentSms();
+      List<SmsMessage> allMessages = []..addAll(inbox)..addAll(sent);
+      return allMessages;
+    } else {
+      throw "تم رفض إذن قراءة الرسائل";
+    }
+  }
+
+  Future<Map<String, List<SmsMessage>>> getGroupedMessages() async {
+    List<SmsMessage> allMessages = await getAllMessages();
+    Map<String, List<SmsMessage>> groupedMessages = {};
+
+    for (var message in allMessages) {
+      String address = message.address ?? "Unknown";
+      if (!groupedMessages.containsKey(address)) {
+        groupedMessages[address] = [];
+      }
+      groupedMessages[address]!.add(message);
+    }
+
+    return groupedMessages;
   }
 
   Future<void> processIncomingSms(SmsMessage sms) async {
     String address = sms.address ?? 'Unknown';
     String content = sms.body ?? '';
-    DateTime timestamp = DateTime.fromMillisecondsSinceEpoch(sms.date ?? 0);
-    bool isMe = false;
-
-    if (content.startsWith('ECDH_KEY_EXCHANGE:')) {
-      String publicKeyStr = content.substring('ECDH_KEY_EXCHANGE:'.length);
-      await _processReceivedPublicKey(address, publicKeyStr);
-      return;
-    }
+    // DateTime timestamp = DateTime.fromMillisecondsSinceEpoch(sms.date ?? 0);
+    DateTime timestamp = DateTime.now();
+    bool isMe = false; // الرسالة مستلمة
+    print("ECDH_KEY_EXCHANGE");
+    // if (content.startsWith('ECDH_KEY_EXCHANGE:')) {
+    //   print("ECDH_KEY_EXCHANGE");
+    //   String publicKeyStr = content.substring('ECDH_KEY_EXCHANGE:'.length);
+    //   await _processReceivedPublicKey(sms, publicKeyStr, timestamp); // تمرير sms كاملة
+    //   return;
+    // }
 
     ConversationKey? key = await getConversationKey(address);
     String decryptedContent = content;
     if (key != null && key.sharedSecret != null) {
       try {
         decryptedContent = DiffieHellmanHelper.decryptMessage(content, key.sharedSecret!);
+        print("تم فك تشفير الرسالة من $address: $decryptedContent");
       } catch (e) {
-        print('Failed to decrypt message: $e');
+        print('فشل في فك تشفير الرسالة: $e');
       }
     }
 
@@ -94,17 +175,27 @@ class MessageController with ChangeNotifier {
       isEncrypted: key != null,
     );
     await _insertMessage(message);
+
     notifyListeners();
   }
 
-  Future<void> _processReceivedPublicKey(String address, String publicKeyStr) async {
-    ConversationKey? existingKey = await getConversationKey(address);
+  Future<void> _insertMessage(Message message) async {
+    await _messagesDb?.insert('messages', message.toMap());
+    notifyListeners();
+  }
 
+  Future<void> _processReceivedPublicKey(SmsMessage sms, String publicKeyStr, DateTime timestamp) async {
+    String address = sms.address ?? 'Unknown';
+    String sender = address; // استخدام عنوان المرسل كقيمة لـ sender
+    // أو استخدم: String sender = sms.sender; (إذا كان موجودًا في SmsMessage)
+
+    print("Processing received public key from $address: $publicKeyStr");
+
+    ConversationKey? existingKey = await getConversationKey(address);
     if (existingKey == null) {
       final keyPair = DiffieHellmanHelper.generateKeyPair();
       final ecPrivate = keyPair.privateKey as ECPrivateKey;
       final ecPublic = keyPair.publicKey as ECPublicKey;
-
       String ownPrivateKey = ecPrivate.d!.toString();
       String ownPublicKey = '${ecPublic.Q!.x!.toBigInteger()}:${ecPublic.Q!.y!.toBigInteger()}';
 
@@ -120,46 +211,77 @@ class MessageController with ChangeNotifier {
         to: address,
         message: 'ECDH_KEY_EXCHANGE:$ownPublicKey',
       );
-    } else if (existingKey.theirPublicKey == null) {
+      print("Sent public key to $address: $ownPublicKey");
+    }  else if (existingKey.theirPublicKey == null) {
       final ecPrivate = ECPrivateKey(
         BigInt.parse(existingKey.ownPrivateKey),
         DiffieHellmanHelper.params,
       );
-      final theirPublicKeyParts = publicKeyStr.split(':');
+      final parts = publicKeyStr.split(':');
       final curve = DiffieHellmanHelper.params.curve;
-      final x = BigInt.parse(theirPublicKeyParts[0]);
-      final y = BigInt.parse(theirPublicKeyParts[1]);
+      final x = BigInt.parse(parts[0]);
+      final y = BigInt.parse(parts[1]);
       final point = curve.createPoint(x, y);
       final theirPublicKey = ECPublicKey(point, DiffieHellmanHelper.params);
+      final sharedSecret = DiffieHellmanHelper.computeSharedSecret(ecPrivate, theirPublicKey);
 
-
-      final sharedSecret = DiffieHellmanHelper.computeSharedSecret(
-        ecPrivate,
-        theirPublicKey,
-      );
-
-      ConversationKey updatedKey = existingKey.copyWith(
-        theirPublicKey: publicKeyStr,
-        sharedSecret: sharedSecret.toString(),
-      );
-      await _insertConversationKey(updatedKey);
+      if (sharedSecret == null) {
+        print("⚠️ Failed to compute shared secret.");
+      } else {
+        ConversationKey updatedKey = existingKey.copyWith(
+          theirPublicKey: publicKeyStr,
+          sharedSecret: sharedSecret.toString(),
+        );
+        await _insertConversationKey(updatedKey);
+        print("Computed shared secret with $address: ${sharedSecret.toString()}");
+      }
     }
-
     notifyListeners();
   }
 
-  Future<void> _insertMessage(Message message) async {
-    await _messagesDb?.insert('messages', message.toMap());
+  Future<List<Message>> getMessagesForThread(String address) async {
+    if (await Permission.sms.status.isGranted) {
+      List<SmsMessage> inbox = await _telephony.getInboxSms();
+      List<SmsMessage> sent = await _telephony.getSentSms();
+
+      List<Message> allMessages = [
+        ...inbox.map((sms) => _convertSmsToMessage(sms, false)),
+        ...sent.map((sms) => _convertSmsToMessage(sms, true)),
+      ];
+
+      List<Message> filteredMessages = allMessages
+          .where((message) => message.sender == address)
+          .toList();
+
+      for (var message in filteredMessages) {
+        print("ok");
+        ConversationKey? key = await getConversationKey(address);
+        print("124587${key?.sharedSecret}");
+        if (key != null && key.sharedSecret != null) {
+          try {
+            message.content = DiffieHellmanHelper.decryptMessage(message.content, key.sharedSecret!);
+            print("124587${message.content}");
+            notifyListeners();
+          } catch (e) {
+            print('فشل في فك تشفير الرسالة: $e');
+          }
+        }
+      }
+
+      return filteredMessages;
+    } else {
+      throw "تم رفض إذن قراءة الرسائل";
+    }
   }
 
-  Future<List<Message>> getMessagesForThread(String address) async {
-    List<Map> maps = await _messagesDb?.query(
-      'messages',
-      where: 'sender = ?',
-      whereArgs: [address],
-    ) ?? [];
-    return maps.map((map) => Message.fromMap(Map<String, dynamic>.from(map))).toList();
-
+  Message _convertSmsToMessage(SmsMessage sms, bool isMe) {
+    return Message(
+      sender: sms.address ?? "Unknown",
+      content: sms.body ?? "",
+      timestamp: DateTime.fromMillisecondsSinceEpoch(sms.date ?? 0),
+      isMe: isMe,
+      isEncrypted: false,
+    );
   }
 
   Future<void> _insertConversationKey(ConversationKey key) async {
@@ -175,74 +297,88 @@ class MessageController with ChangeNotifier {
       'conversation_keys',
       where: 'address = ?',
       whereArgs: [address],
-    ) ?? [];
+    ) ??
+        [];
+
     if (maps.isNotEmpty) {
-      return ConversationKey.fromMap(Map<String, dynamic>.from(maps.first));
+      return ConversationKey.fromMap(Map<String, dynamic>.from(maps.last));
     }
-    return null;
+
+    // إذا لم يكن هناك مفتاح، يتم إنشاء مفاتيح جديدة
+    final keyPair = DiffieHellmanHelper.generateKeyPair();
+    final ecPrivate = keyPair.privateKey as ECPrivateKey;
+    final ecPublic = keyPair.publicKey as ECPublicKey;
+    String ownPrivateKey = ecPrivate.d!.toString();
+    String ownPublicKey = '${ecPublic.Q!.x!.toBigInteger()}:${ecPublic.Q!.y!.toBigInteger()}';
+
+    print("تم إنشاء زوج المفاتيح:");
+    print("المفتاح العام: $ownPublicKey");
+    print("المفتاح الخاص: $ownPrivateKey");
+
+    ConversationKey newKey = ConversationKey(
+      address: address,
+      ownPrivateKey: ownPrivateKey,
+      ownPublicKey: ownPublicKey,
+      theirPublicKey: null,
+      sharedSecret: null,
+    );
+
+    await _insertConversationKey(newKey);
+
+    // بدء تبادل المفاتيح عبر الإنترنت
+    ConversationKey? exchangedKey = await _keyExchangeService.sendPublicKey(address, ownPublicKey);
+
+    if (exchangedKey != null && exchangedKey.theirPublicKey != null && exchangedKey.sharedSecret != null) {
+      final parts = exchangedKey.theirPublicKey!.split(':');
+      final BigInt x = BigInt.parse(parts[0]);
+      final BigInt y = BigInt.parse(parts[1]);
+      final point = DiffieHellmanHelper.params.curve.createPoint(x, y);
+      final theirPublicKeyConverted = ECPublicKey(point, DiffieHellmanHelper.params);
+
+      final sharedSecret = DiffieHellmanHelper.computeSharedSecret(ecPrivate, theirPublicKeyConverted);
+      print("🔒 المفتاح المشترك المحسوب: ${sharedSecret.toString()}");
+
+      ConversationKey updatedKey = newKey.copyWith(
+        theirPublicKey: exchangedKey.theirPublicKey,
+        sharedSecret: sharedSecret.toString(),
+      );
+
+      await _insertConversationKey(updatedKey);
+
+      print("✅ تم تبادل المفاتيح عبر الإنترنت مع $address");
+      print("📌 المفتاح العام للطرف الآخر: ${exchangedKey.theirPublicKey}");
+      print("🔒 المفتاح المشترك: ${sharedSecret.toString()}");
+
+      return updatedKey; // ✅ إرجاع المفتاح بعد التحديث
+    } else {
+      print("⚠️ لم يتم تبادل المفاتيح عبر الإنترنت بعد.");
+      return newKey; // ✅ إرجاع المفتاح الجديد حتى لو لم يتم التبادل
+    }
   }
 
-  // Future<void> sendSMS(String message, List<String> recipients) async {
-  //   try {
-  //     if (await Permission.sms.request().isGranted) {
-  //       for (String recipient in recipients) {
-  //         ConversationKey? key = await getConversationKey(recipient);
-  //         String encryptedMessage = message;
-  //         if (key == null || key.sharedSecret == null) {
-  //           await _initiateKeyExchange(recipient);
-  //           return;
-  //         } else {
-  //           encryptedMessage = DiffieHellmanHelper.encryptMessage(message, key.sharedSecret!);
-  //         }
-  //
-  //         await _telephony.sendSms(
-  //           to: recipient,
-  //           message: encryptedMessage,
-  //         );
-  //
-  //         Message localMessage = Message(
-  //           sender: recipient,
-  //           content: message,
-  //           timestamp: DateTime.now(),
-  //           isMe: true,
-  //           isEncrypted: true,
-  //         );
-  //         await _insertMessage(localMessage);
-  //       }
-  //       notifyListeners();
-  //     } else {
-  //       throw "تم رفض إذن إرسال الرسائل";
-  //     }
-  //   } catch (e) {
-  //     throw "فشل في إرسال الرسالة: $e";
-  //   }
-  // }
+
   Future<void> sendSMS(String message, List<String> recipients) async {
     try {
       if (await Permission.sms.request().isGranted) {
         for (String recipient in recipients) {
-          String finalMessage = message; // الرسالة النهائية التي سيتم إرسالها
+          String finalMessage = message;
 
-          // التحقق من وجود مفتاح المحادثة
           ConversationKey? key = await getConversationKey(recipient);
           if (key != null && key.sharedSecret != null) {
-            // تشفير الرسالة إذا كان هناك مفتاح مشترك
             finalMessage = DiffieHellmanHelper.encryptMessage(message, key.sharedSecret!);
-
+            print("الرسالة المشفرة: $finalMessage");
           } else {
             print("⚠️ لم يتم تبادل المفاتيح بعد، سيتم إرسال الرسالة بدون تشفير.");
           }
 
-          // إرسال الرسالة (سواء كانت مشفرة أو غير مشفرة)
           await _telephony.sendSms(
             to: recipient,
             message: finalMessage,
           );
 
-          // حفظ الرسالة في قاعدة البيانات
           Message localMessage = Message(
             sender: recipient,
-            content: message, // حفظ الرسالة الأصلية (غير المشفرة)
+            content: message,
             timestamp: DateTime.now(),
             isMe: true,
             isEncrypted: key != null && key.sharedSecret != null,
@@ -258,40 +394,70 @@ class MessageController with ChangeNotifier {
     }
   }
 
+  Future<void> initiateKeyExchange(String recipient) async {
 
-  Future<void> _initiateKeyExchange(String recipient) async {
+    ConversationKey? existingKey = await getConversationKey(recipient);
+    if (existingKey != null && existingKey.sharedSecret != null) {
+      print("Existing shared secret: ${existingKey.sharedSecret}");
+      return;
+    }
+
     final keyPair = DiffieHellmanHelper.generateKeyPair();
+    final ecPrivate = keyPair.privateKey as ECPrivateKey;
     final ecPublic = keyPair.publicKey as ECPublicKey;
+    String ownPrivateKey = ecPrivate.d!.toString();
     String ownPublicKey = '${ecPublic.Q!.x!.toBigInteger()}:${ecPublic.Q!.y!.toBigInteger()}';
-    String ownPrivateKey = (keyPair.privateKey as ECPrivateKey).d!.toString();
+
+    print("تم إنشاء زوج المفاتيح:");
+    print("المفتاح العام: $recipient");
+    print("المفتاح الخاص: $ownPrivateKey");
 
     ConversationKey newKey = ConversationKey(
       address: recipient,
       ownPrivateKey: ownPrivateKey,
       ownPublicKey: ownPublicKey,
+      theirPublicKey: null,
+      sharedSecret: null,
     );
     await _insertConversationKey(newKey);
 
-    await _telephony.sendSms(
-      to: recipient,
-      message: 'ECDH_KEY_EXCHANGE:$ownPublicKey',
-    );
+    ConversationKey? exchangedKey = await _keyExchangeService.sendPublicKey(recipient, ownPublicKey);
+    if (exchangedKey != null &&
+        exchangedKey.theirPublicKey != null &&
+        exchangedKey.sharedSecret != null) {
+      final parts = exchangedKey.theirPublicKey!.split(':');
+      final BigInt x = BigInt.parse(parts[0]);
+      final BigInt y = BigInt.parse(parts[1]);
+      final point = DiffieHellmanHelper.params.curve.createPoint(x, y);
+      final theirPublicKeyConverted = ECPublicKey(point, DiffieHellmanHelper.params);
+
+      final sharedSecret = DiffieHellmanHelper.computeSharedSecret(ecPrivate, theirPublicKeyConverted);
+      print("🔒 المفتاح المشترك المحسوب: ${sharedSecret.toString()}");
+
+      ConversationKey updatedKey = newKey.copyWith(
+        theirPublicKey: exchangedKey.theirPublicKey,
+        sharedSecret: sharedSecret.toString(),
+      );
+      await _insertConversationKey(updatedKey);
+      print("✅ تم تبادل المفاتيح عبر الإنترنت مع $recipient");
+      // print("📌 المفتاح العام للطرف الآخر: ${exchangedKey.theirPublicKey}");
+      print("🔒 المفتاح المشترك: ${sharedSecret.toString()}");
+    } else {
+      print("⚠️ لم يتم تبادل المفاتيح عبر الإنترنت بعد.");
+    }
   }
+
   Future<Map<String, List<SmsMessage>>> getConversations() async {
     if (await Permission.sms.request().isGranted) {
-      // الحصول على الرسائل الواردة والصادرة
       List<SmsMessage> inbox = await _telephony.getInboxSms();
       List<SmsMessage> sent = await _telephony.getSentSms();
-
-      // إنشاء نسخة قابلة للتعديل من القوائم
       List<SmsMessage> allMessages = List<SmsMessage>.from(inbox)..addAll(List<SmsMessage>.from(sent));
 
-      // تجميع الرسائل حسب الرقم
       Map<String, List<SmsMessage>> groupedMessages = {};
       for (var message in allMessages) {
         String address = message.address ?? "Unknown";
         if (!groupedMessages.containsKey(address)) {
-          groupedMessages[address] = []; // إنشاء قائمة جديدة قابلة للتعديل
+          groupedMessages[address] = [];
         }
         groupedMessages[address]!.add(message);
       }
@@ -302,251 +468,3 @@ class MessageController with ChangeNotifier {
     }
   }
 }
-// import 'package:flutter/material.dart';
-// import 'package:sqflite/sqflite.dart';
-// import 'package:telephony/telephony.dart';
-// import 'package:permission_handler/permission_handler.dart';
-// import 'package:untitled14/models/message_model.dart';
-// import 'package:untitled14/utils/encryption.dart';
-// import 'package:path/path.dart';
-// import 'package:flutter/foundation.dart';
-//
-//
-// class MessageController with ChangeNotifier {
-//   final Telephony _telephony = Telephony.instance;
-//
-//   /// إرسال رسالة نصية إلى قائمة من المستقبلين
-//   Future<void> sendSMS(String message, List<String> recipients) async {
-//     try {
-//       if (await Permission.sms.request().isGranted) {
-//         for (String recipient in recipients) {
-//           await _telephony.sendSms(
-//             to: recipient,
-//             message: message,
-//           );
-//         }
-//         notifyListeners(); // إعلام المستمعين بالتحديث
-//       } else {
-//         throw "تم رفض إذن إرسال الرسائل";
-//       }
-//     } catch (e) {
-//       throw "فشل في إرسال الرسالة: $e";
-//     }
-//   }
-//   Future<Map<String, List<SmsMessage>>> getConversations() async {
-//     if (await Permission.sms.request().isGranted) {
-//       // الحصول على الرسائل الواردة والصادرة
-//       List<SmsMessage> inbox = await _telephony.getInboxSms();
-//       List<SmsMessage> sent = await _telephony.getSentSms();
-//
-//       // دمج الرسائل في قائمة واحدة
-//       List<SmsMessage> allMessages =
-//       List<SmsMessage>.from(inbox)..addAll(List<SmsMessage>.from(sent));
-//
-//       // تجميع الرسائل حسب الرقم (address)
-//       Map<String, List<SmsMessage>> groupedMessages = {};
-//       for (var message in allMessages) {
-//         String address = message.address ?? "Unknown";
-//         if (!groupedMessages.containsKey(address)) {
-//           groupedMessages[address] = [];
-//         }
-//         groupedMessages[address]!.add(message);
-//       }
-//
-//       return groupedMessages;
-//     } else {
-//       throw "تم رفض إذن قراءة الرسائل";
-//     }
-//   }
-//
-//
-//
-//   // جلب رسائل المحادثة الخاصة بعنوان محدد (رسائل واردة ومرسلة)
-//   Future<List<Message>> getMessagesForThread(String address) async {
-//   if (await Permission.sms.request().isGranted) {
-//   // جلب الرسائل الواردة التي تخص هذا العنوان
-//   List<SmsMessage> inbox = await _telephony.getInboxSms(
-//   filter: SmsFilter.where(SmsColumn.ADDRESS).equals(address),
-//   );
-//   // جلب الرسائل المرسلة التي تخص هذا العنوان
-//   List<SmsMessage> sent = await _telephony.getSentSms(
-//   filter: SmsFilter.where(SmsColumn.ADDRESS).equals(address),
-//   );
-//
-//   List<Message> messages = [];
-//
-//   // تحويل رسائل الوارد إلى كائنات Message (isMe: false)
-//   for (var sms in inbox) {
-//   DateTime date = DateTime.fromMillisecondsSinceEpoch(sms.date ?? 0);
-//   messages.add(Message(
-//   sender: address,
-//   content: sms.body ?? "",
-//   timestamp: date,
-//   isMe: false,
-//   ));
-//   }
-//   // تحويل رسائل الصادر إلى كائنات Message (isMe: true)
-//   for (var sms in sent) {
-//   DateTime date = DateTime.fromMillisecondsSinceEpoch(sms.date ?? 0);
-//   messages.add(Message(
-//   sender: address,
-//   content: sms.body ?? "",
-//   timestamp: date,
-//   isMe: true,
-//   ));
-//   }
-//   // ترتيب الرسائل بحيث يكون الأحدث أولاً
-//   messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-//   return messages;
-//   } else {
-//   throw "تم رفض إذن قراءة الرسائل";
-//   }
-//   }
-//
-// }
-
-//
-// class MessageController with ChangeNotifier {
-//   final Telephony _telephony = Telephony.instance;
-//
-//   // إرسال الرسالة
-//   Future<void> sendSMS(String message, List<String> recipients) async {
-//     try {
-//       if (await Permission.sms.request().isGranted) {
-//         for (String recipient in recipients) {
-//           await _telephony.sendSms(
-//             to: recipient,
-//             message: message,
-//           );
-//         }
-//         notifyListeners(); // إعلام المشتركين بالتحديث
-//       } else {
-//         throw "تم رفض إذن إرسال الرسائل";
-//       }
-//     } catch (e) {
-//       throw "فشل في إرسال الرسالة: $e";
-//     }
-//   }
-//
-//   // الحصول على جميع المحادثات
-//   Future<Map<String, List<SmsMessage>>> getConversations() async {
-//     if (await Permission.sms.request().isGranted) {
-//       // الحصول على الرسائل الواردة والصادرة
-//       List<SmsMessage> inbox = await _telephony.getInboxSms();
-//       List<SmsMessage> sent = await _telephony.getSentSms();
-//
-//       // إنشاء نسخة قابلة للتعديل من القوائم
-//       List<SmsMessage> allMessages = List<SmsMessage>.from(inbox)..addAll(List<SmsMessage>.from(sent));
-//
-//       // تجميع الرسائل حسب الرقم
-//       Map<String, List<SmsMessage>> groupedMessages = {};
-//       for (var message in allMessages) {
-//         String address = message.address ?? "Unknown";
-//         if (!groupedMessages.containsKey(address)) {
-//           groupedMessages[address] = []; // إنشاء قائمة جديدة قابلة للتعديل
-//         }
-//         groupedMessages[address]!.add(message);
-//       }
-//
-//       return groupedMessages;
-//     } else {
-//       throw "تم رفض إذن قراءة الرسائل";
-//     }
-//   }
-//
-//   // الحصول على رسائل محادثة محددة
-//   Future<List<SmsMessage>> getMessagesForThread(String address) async {
-//     if (await Permission.sms.request().isGranted) {
-//       List<SmsMessage> inbox = await _telephony.getInboxSms(
-//         filter: SmsFilter.where(SmsColumn.ADDRESS).equals(address),
-//       );
-//       List<SmsMessage> sent = await _telephony.getSentSms(
-//         filter: SmsFilter.where(SmsColumn.ADDRESS).equals(address),
-//       );
-//
-//       // إنشاء نسخة قابلة للتعديل من القوائم
-//       List<SmsMessage> allMessages = List<SmsMessage>.from(inbox)..addAll(List<SmsMessage>.from(sent));
-//       allMessages.sort((a, b) => (b.date ?? 0).compareTo(a.date ?? 0)); // ترتيب الرسائل من الأحدث إلى الأقدم
-//
-//       return allMessages;
-//     } else {
-//       throw "تم رفض إذن قراءة الرسائل";
-//     }
-//   }
-// }
-
-// late Database _database;
-// final List<Message> _messages = [];
-//
-// List<Message> get messages => _messages;
-//
-// Future<void> initDatabase() async {
-//   _database = await openDatabase(
-//     join(await getDatabasesPath(), 'messages.db'),
-//     onCreate: (db, version) {
-//       return db.execute(
-//         "CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT, content TEXT, timestamp TEXT, isMe INTEGER)",
-//       );
-//     },
-//     version: 1,
-//   );
-// }
-// Future<void> sendMessage(String message, String recipient, String key) async {
-//   String encryptedMessage = EncryptionUtils.encryptMessage(message, key);
-//   final newMessage = Message(sender: recipient, content: encryptedMessage, timestamp: DateTime.now(), isMe: true);
-//
-//   _messages.insert(0, newMessage);
-//   await _database.insert('messages', newMessage.toMap());
-//   notifyListeners();
-// }
-
-// Future<List<Message>> getMessagesForThread(String address, String key) async {
-//   final List<Map<String, dynamic>> maps =
-//   await _database.query('messages', where: "sender = ?", whereArgs: [address]);
-//   return List.generate(maps.length, (i) {
-//     String decryptedMessage = EncryptionUtils.decryptMessage(maps[i]['content'], key);
-//     return Message.fromMap(maps[i])..content = decryptedMessage;
-//   });
-// }
-
-/// جلب رسائل المحادثة الخاصة بعنوان محدد (رسائل واردة ومرسلة)
-// Future<List<Message>> getMessagesForThread(String address) async {
-//   if (await Permission.sms.request().isGranted) {
-//     // جلب الرسائل الواردة التي تخص هذا العنوان
-//     List<SmsMessage> inbox = await _telephony.getInboxSms(
-//       filter: SmsFilter.where(SmsColumn.ADDRESS).equals(address),
-//     );
-//     // جلب الرسائل المرسلة التي تخص هذا العنوان
-//     List<SmsMessage> sent = await _telephony.getSentSms(
-//       filter: SmsFilter.where(SmsColumn.ADDRESS).equals(address),
-//     );
-//
-//     List<Message> messages = [];
-//
-//     // تحويل رسائل الوارد إلى كائنات Message (isMe: false)
-//     for (var sms in inbox) {
-//       DateTime date = DateTime.fromMillisecondsSinceEpoch(sms.date ?? 0);
-//       messages.add(Message(
-//         sender: address,
-//         content: sms.body ?? "",
-//         timestamp: date,
-//         isMe: false,
-//       ));
-//     }
-//     // تحويل رسائل الصادر إلى كائنات Message (isMe: true)
-//     for (var sms in sent) {
-//       DateTime date = DateTime.fromMillisecondsSinceEpoch(sms.date ?? 0);
-//       messages.add(Message(
-//         sender: address,
-//         content: sms.body ?? "",
-//         timestamp: date,
-//         isMe: true,
-//       ));
-//     }
-//     // ترتيب الرسائل بحيث يكون الأحدث أولاً
-//     messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-//     return messages;
-//   } else {
-//     throw "تم رفض إذن قراءة الرسائل";
-//   }
-// }
