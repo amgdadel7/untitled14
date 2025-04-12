@@ -19,7 +19,7 @@ void main() {
         providers: [
           ChangeNotifierProvider(create: (_) => MessageController()),
         ],
-        child: const MyApp(), // أضف المعلمة المطلوبة هنا
+        child:  MyApp(permissionsGranted: false,), // أضف المعلمة المطلوبة هنا
       ),
     );
 

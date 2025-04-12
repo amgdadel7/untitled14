@@ -1,13 +1,13 @@
 class Message {
-  final int id;
+  final int? id;
   final String sender;
-   String content;
+  String content;
   final DateTime timestamp;
   final bool isMe;
   final bool isEncrypted;
 
   Message({
-    this.id = 0,
+    this.id,
     required this.sender,
     required this.content,
     required this.timestamp,
