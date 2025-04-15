@@ -87,15 +87,15 @@ class _ConversationsScreenState extends State<ConversationsScreen>
     }
   }
 
-  Future<void> _listenForNewMessages() async {
-    try {
-      final messages = await _telephony.getInboxSms();
-      print("تم العثور على ${messages.length} رسالة جديدة");
-      await _loadConversations();
-    } catch (e) {
-      print("خطأ في جلب الرسائل: $e");
-    }
-  }
+  // Future<void> _listenForNewMessages() async {
+  //   try {
+  //     final messages = await _telephony.getInboxSms();
+  //     print("تم العثور على ${messages.length} رسالة جديدة");
+  //     await _loadConversations();
+  //   } catch (e) {
+  //     print("خطأ في جلب الرسائل: $e");
+  //   }
+  // }
 
   Future<void> _requestSmsPermission() async {
     await Permission.sms.request();

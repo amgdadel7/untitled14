@@ -1,9 +1,6 @@
-import 'package:country_picker/country_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:flutter_svg/flutter_svg.dart';
-import 'package:lottie/lottie.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:untitled14/utils/country_code_utils.dart';
 import 'package:untitled14/utils/validators.dart';

@@ -319,183 +319,183 @@ class _ChatScreenState extends State<ChatScreen> {
     return digits;
   }
 
-  Future<void> _sendMessage() async {
-    final messageController = Provider.of<MessageController>(context, listen: false);
-    final text = _messageController.text.trim();
-    if (text.isEmpty) return;
-
-    try {
-      String address = widget.address;
-      String lastNine = getLastNineDigits(address);
-
-      // الحصول على معرّفات الأجهزة
-      final senderUUID1 = await getAndPrintUuid();
-      if (senderUUID1 == null || senderUUID1['uuid'] == null || senderUUID1['phone_num'] == null) {
-        throw Exception('فشل في استرجاع UUID أو رقم الهاتف');
-      }
-      String senderUUID = senderUUID1['uuid']!;
-      String senderNUM = senderUUID1['phone_num']!;
-      String? receiverUUID = "";
-      final getreceiveruuid = DatabaseHelper();
-      receiverUUID = await getreceiveruuid.queryreceiverUUID(
-        senderUUID: senderUUID,
-        receiverNUM: lastNine,
-      );
-      if (receiverUUID == null) {
-        // البحث مرة أخرى بطريقة بديلة
-        receiverUUID = await findDeviceUuid(lastNine);
-
-        if (receiverUUID == null) {
-          throw Exception('فشل العثور على UUID بعد البحث');
-        }
-      }
-
-      final getkeyexsist = DatabaseHelper();
-      final db = await getkeyexsist.database;
-      await getkeyexsist.onCreate(db, 2);
-      print("asawwwaddd$lastNine");
-      String? key = await getkeyexsist.queryKeysLocally(
-        senderUUID: senderUUID,
-        receiverNUM: lastNine,
-      );
-      print("keyskeys$key");
-      if (key == null || key.isEmpty) {
-        final keys = await messageController.getConversationKey(widget.address);
-        if (keys == null || keys.ownPublicKey.isEmpty || keys.ownPrivateKey.isEmpty) {
-          throw Exception('فشل في توليد مفاتيح التشفير');
-        }
-
-        // تسجيل بيانات تبادل المفاتيح مع الخادم
-        print('إرسال بيانات تبادل المفاتيح:');
-        print('senderPublicKey: ${keys.ownPublicKey}');
-        print('senderUUID: $senderUUID');
-        print('receiverUUID: $receiverUUID');
-
-        final keyExchangeResponse = await http.post(
-          Uri.parse('https://political-thoracic-spatula.glitch.me/api/exchange-keys'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'senderUUID': senderUUID,
-            'receiverUUID': receiverUUID,
-            'senderPublicKey': keys.ownPublicKey,
-            'targetPhone': widget.address,
-          }),
-        ).timeout(const Duration(seconds: 10));
-
-        if (keyExchangeResponse.statusCode != 200) {
-          print('فشل تبادل المفاتيح. رمز الحالة: ${keyExchangeResponse.statusCode}');
-          print('رد الخادم: ${keyExchangeResponse.body}');
-          throw Exception('فشل تبادل المفاتيح مع الخادم');
-        }
-
-        final exchangeData = jsonDecode(keyExchangeResponse.body);
-        if (exchangeData['targetPublicKey'] == null) {
-          throw Exception('لم يتم استلام المفتاح العام من الخادم');
-        }
-
-        // توليد زوج المفاتيح
-        final keyPair = DiffieHellmanHelper.generateKeyPair();
-        final myPrivateKey = keyPair.privateKey as ECPrivateKey;
-        final peerPublicKey = keyPair.publicKey as ECPublicKey;
-
-        // حساب السر المشترك باستخدام المفاتيح المناسبة
-        final sharedSecret = DiffieHellmanHelper.computeSharedSecret(myPrivateKey, peerPublicKey);
-        final dbHelper = DatabaseHelper();
-        await dbHelper.storeKeysLocally(
-          senderUUID: senderUUID,
-          senderNUM: senderNUM,
-          receiverUUID: receiverUUID,
-          receiverNUM: lastNine,
-          sharedSecret: sharedSecret,
-        );
-
-        final storeResponse = await http.post(
-          Uri.parse('https://political-thoracic-spatula.glitch.me/api/store-keys'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'senderUUID': senderUUID,
-            'senderNUM' : senderNUM,
-            'receiverUUID': receiverUUID,
-            'receiverNUM':lastNine,
-            'sharedSecret': sharedSecret.toString()
-          }),
-        ).timeout(const Duration(seconds: 10));
-
-        if (storeResponse.statusCode != 200) {
-          print('فشل حفظ المفاتيح. رمز الحالة: ${storeResponse.statusCode}');
-          print('رد الخادم: ${storeResponse.body}');
-          throw Exception('فشل تبادل المفاتيح مع الخادم');
-        }
-
-        final storeData = jsonDecode(storeResponse.body);
-        if (storeData['success'] != true) {
-          throw Exception('لم يتم استلام المفتاح العام من الخادم');
-        }
-
-        final secret = BigInt.parse(sharedSecret.toString());
-        print("encryptedMessage$secret");
-        // تشفير الرسالة باستخدام المفتاح المشترك
-        final encryptedMessage = DiffieHellmanHelper.encryptMessage(text, secret);
-        print("Decrypted: $secret");
-
-        // إرسال الرسالة المشفرة عبر SMS وتخزين النص الأصلي محلياً
-        await messageController.sendEncryptedMessage(encryptedMessage, text, widget.address);
-        Message newMessage = Message(
-          sender: widget.address,
-          content: text,
-          timestamp: DateTime.now(),
-          isMe: true,
-          isEncrypted: true,
-        );
-
-        setState(() {
-          _messages.add(newMessage);
-          _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-        });
-
-        _messageController.clear();
-        _loadMessages();
-
-        WidgetsBinding.instance?.addPostFrameCallback((_) {
-          if (_scrollController.hasClients) {
-            _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-          }
-        });
-      } else {
-        print("secret key is: $key");
-        final secret = BigInt.parse(key.toString());
-        print("encryptedMessage$secret");
-        final encryptedMessage = DiffieHellmanHelper.encryptMessage(text, secret);
-        await messageController.sendEncryptedMessage(encryptedMessage, text, widget.address);
-
-        Message newMessage = Message(
-          sender: widget.address,
-          content: text,
-          timestamp: DateTime.now(),
-          isMe: true,
-          isEncrypted: true,
-        );
-
-        setState(() {
-          _messages.add(newMessage);
-          _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-        });
-
-        _messageController.clear();
-
-        WidgetsBinding.instance?.addPostFrameCallback((_) {
-          if (_scrollController.hasClients) {
-            _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-          }
-        });
-      }
-    } catch (e) {
-      print('خطأ غير متوقع: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('حدث خطأ أثناء إرسال الرسالة: ${e.toString()}')),
-      );
-    }
-  }
+  // Future<void> _sendMessage() async {
+  //   final messageController = Provider.of<MessageController>(context, listen: false);
+  //   final text = _messageController.text.trim();
+  //   if (text.isEmpty) return;
+  //
+  //   try {
+  //     String address = widget.address;
+  //     String lastNine = getLastNineDigits(address);
+  //
+  //     // الحصول على معرّفات الأجهزة
+  //     final senderUUID1 = await getAndPrintUuid();
+  //     if (senderUUID1 == null || senderUUID1['uuid'] == null || senderUUID1['phone_num'] == null) {
+  //       throw Exception('فشل في استرجاع UUID أو رقم الهاتف');
+  //     }
+  //     String senderUUID = senderUUID1['uuid']!;
+  //     String senderNUM = senderUUID1['phone_num']!;
+  //     String? receiverUUID = "";
+  //     final getreceiveruuid = DatabaseHelper();
+  //     receiverUUID = await getreceiveruuid.queryreceiverUUID(
+  //       senderUUID: senderUUID,
+  //       receiverNUM: lastNine,
+  //     );
+  //     if (receiverUUID == null) {
+  //       // البحث مرة أخرى بطريقة بديلة
+  //       receiverUUID = await findDeviceUuid(lastNine);
+  //
+  //       if (receiverUUID == null) {
+  //         throw Exception('فشل العثور على UUID بعد البحث');
+  //       }
+  //     }
+  //
+  //     final getkeyexsist = DatabaseHelper();
+  //     final db = await getkeyexsist.database;
+  //     await getkeyexsist.onCreate(db, 2);
+  //     print("asawwwaddd$lastNine");
+  //     String? key = await getkeyexsist.queryKeysLocally(
+  //       senderUUID: senderUUID,
+  //       receiverNUM: lastNine,
+  //     );
+  //     print("keyskeys$key");
+  //     if (key == null || key.isEmpty) {
+  //       final keys = await messageController.getConversationKey(widget.address);
+  //       if (keys == null || keys.ownPublicKey.isEmpty || keys.ownPrivateKey.isEmpty) {
+  //         throw Exception('فشل في توليد مفاتيح التشفير');
+  //       }
+  //
+  //       // تسجيل بيانات تبادل المفاتيح مع الخادم
+  //       print('إرسال بيانات تبادل المفاتيح:');
+  //       print('senderPublicKey: ${keys.ownPublicKey}');
+  //       print('senderUUID: $senderUUID');
+  //       print('receiverUUID: $receiverUUID');
+  //
+  //       final keyExchangeResponse = await http.post(
+  //         Uri.parse('https://political-thoracic-spatula.glitch.me/api/exchange-keys'),
+  //         headers: {'Content-Type': 'application/json'},
+  //         body: jsonEncode({
+  //           'senderUUID': senderUUID,
+  //           'receiverUUID': receiverUUID,
+  //           'senderPublicKey': keys.ownPublicKey,
+  //           'targetPhone': widget.address,
+  //         }),
+  //       ).timeout(const Duration(seconds: 10));
+  //
+  //       if (keyExchangeResponse.statusCode != 200) {
+  //         print('فشل تبادل المفاتيح. رمز الحالة: ${keyExchangeResponse.statusCode}');
+  //         print('رد الخادم: ${keyExchangeResponse.body}');
+  //         throw Exception('فشل تبادل المفاتيح مع الخادم');
+  //       }
+  //
+  //       final exchangeData = jsonDecode(keyExchangeResponse.body);
+  //       if (exchangeData['targetPublicKey'] == null) {
+  //         throw Exception('لم يتم استلام المفتاح العام من الخادم');
+  //       }
+  //
+  //       // توليد زوج المفاتيح
+  //       final keyPair = DiffieHellmanHelper.generateKeyPair();
+  //       final myPrivateKey = keyPair.privateKey as ECPrivateKey;
+  //       final peerPublicKey = keyPair.publicKey as ECPublicKey;
+  //
+  //       // حساب السر المشترك باستخدام المفاتيح المناسبة
+  //       final sharedSecret = DiffieHellmanHelper.computeSharedSecret(myPrivateKey, peerPublicKey);
+  //       final dbHelper = DatabaseHelper();
+  //       await dbHelper.storeKeysLocally(
+  //         senderUUID: senderUUID,
+  //         senderNUM: senderNUM,
+  //         receiverUUID: receiverUUID,
+  //         receiverNUM: lastNine,
+  //         sharedSecret: sharedSecret,
+  //       );
+  //
+  //       final storeResponse = await http.post(
+  //         Uri.parse('https://political-thoracic-spatula.glitch.me/api/store-keys'),
+  //         headers: {'Content-Type': 'application/json'},
+  //         body: jsonEncode({
+  //           'senderUUID': senderUUID,
+  //           'senderNUM' : senderNUM,
+  //           'receiverUUID': receiverUUID,
+  //           'receiverNUM':lastNine,
+  //           'sharedSecret': sharedSecret.toString()
+  //         }),
+  //       ).timeout(const Duration(seconds: 10));
+  //
+  //       if (storeResponse.statusCode != 200) {
+  //         print('فشل حفظ المفاتيح. رمز الحالة: ${storeResponse.statusCode}');
+  //         print('رد الخادم: ${storeResponse.body}');
+  //         throw Exception('فشل تبادل المفاتيح مع الخادم');
+  //       }
+  //
+  //       final storeData = jsonDecode(storeResponse.body);
+  //       if (storeData['success'] != true) {
+  //         throw Exception('لم يتم استلام المفتاح العام من الخادم');
+  //       }
+  //
+  //       final secret = BigInt.parse(sharedSecret.toString());
+  //       print("encryptedMessage$secret");
+  //       // تشفير الرسالة باستخدام المفتاح المشترك
+  //       final encryptedMessage = DiffieHellmanHelper.encryptMessage(text, secret);
+  //       print("Decrypted: $secret");
+  //
+  //       // إرسال الرسالة المشفرة عبر SMS وتخزين النص الأصلي محلياً
+  //       await messageController.sendEncryptedMessage(encryptedMessage, text, widget.address);
+  //       Message newMessage = Message(
+  //         sender: widget.address,
+  //         content: text,
+  //         timestamp: DateTime.now(),
+  //         isMe: true,
+  //         isEncrypted: true,
+  //       );
+  //
+  //       setState(() {
+  //         _messages.add(newMessage);
+  //         _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  //       });
+  //
+  //       _messageController.clear();
+  //       _loadMessages();
+  //
+  //       WidgetsBinding.instance?.addPostFrameCallback((_) {
+  //         if (_scrollController.hasClients) {
+  //           _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+  //         }
+  //       });
+  //     } else {
+  //       print("secret key is: $key");
+  //       final secret = BigInt.parse(key.toString());
+  //       print("encryptedMessage$secret");
+  //       final encryptedMessage = DiffieHellmanHelper.encryptMessage(text, secret);
+  //       await messageController.sendEncryptedMessage(encryptedMessage, text, widget.address);
+  //
+  //       Message newMessage = Message(
+  //         sender: widget.address,
+  //         content: text,
+  //         timestamp: DateTime.now(),
+  //         isMe: true,
+  //         isEncrypted: true,
+  //       );
+  //
+  //       setState(() {
+  //         _messages.add(newMessage);
+  //         _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  //       });
+  //
+  //       _messageController.clear();
+  //
+  //       WidgetsBinding.instance?.addPostFrameCallback((_) {
+  //         if (_scrollController.hasClients) {
+  //           _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+  //         }
+  //       });
+  //     }
+  //   } catch (e) {
+  //     print('خطأ غير متوقع: $e');
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       SnackBar(content: Text('حدث خطأ أثناء إرسال الرسالة: ${e.toString()}')),
+  //     );
+  //   }
+  // }
   // Future<void> _sendMessage() async {
   //   final messageController = Provider.of<MessageController>(context, listen: false);
   //   final text = _messageController.text.trim();
@@ -809,6 +809,247 @@ class _ChatScreenState extends State<ChatScreen> {
 //       }
 //     });
 //   }
+  Future<void> _sendMessage() async {
+    final messageController = Provider.of<MessageController>(context, listen: false);
+    final text = _messageController.text.trim();
+    if (text.isEmpty) return;
+
+    try {
+      final address = widget.address;
+      final lastNine = getLastNineDigits(address);
+
+      // الحصول على معرّفات الجهاز: senderUUID, senderNUM, receiverUUID
+      final deviceIds = await _getDeviceIds(lastNine);
+      final senderUUID = deviceIds['senderUUID']!;
+      final senderNUM = deviceIds['senderNUM']!;
+      final receiverUUID = deviceIds['receiverUUID']!;
+
+      // تجهيز مفتاح التشفير (shared secret)
+      // final secret = await _prepareSharedKey(senderUUID, senderNUM, receiverUUID, lastNine);
+      final secret = await _prepareSharedKey(deviceIds['senderUUID']!, deviceIds['senderNUM']!, deviceIds['receiverUUID']!, lastNine);
+
+      // تشفير الرسالة باستخدام المفتاح المشترك وإرسالها
+      await _processAndSendMessage(
+        text,
+        secret,
+        messageController,
+        widget.address,
+      );
+
+      // تحديث واجهة المستخدم (إضافة الرسالة الجديدة إلى القائمة وتحديث الـ scroll)
+      _updateUIWithNewMessage(widget.address, text);
+
+      _messageController.clear();
+      // _loadMessages();
+      _scrollToBottom();
+    } catch (e) {
+      print('خطأ غير متوقع: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('حدث خطأ أثناء إرسال الرسالة: ${e.toString()}')),
+      );
+    }
+  }
+
+  /// دالة للحصول على معرّفات الجهاز (sender و receiver)
+  Future<Map<String, String>> _getDeviceIds(String lastNine) async {
+    // الحصول على معرّف الجهاز ورقم الهاتف الخاص بالمرسل
+    final senderData = await getAndPrintUuid();
+    if (senderData == null ||
+        senderData['uuid'] == null ||
+        senderData['phone_num'] == null) {
+      throw Exception('فشل في استرجاع UUID أو رقم الهاتف');
+    }
+    // final senderUUID = senderData['uuid']!;
+    // final senderNUM = senderData['phone_num']!;
+
+    // البحث عن receiverUUID في قاعدة البيانات
+    final dbHelper = DatabaseHelper();
+    // String? receiverUUID = await dbHelper.queryreceiverUUID(
+    //   senderUUID: senderData['uuid'],
+    //   receiverNUM: lastNine,
+    // );
+    String? receiverUUID = await dbHelper.queryreceiverUUID_by_serderUUID(
+      senderNUM: senderData['phone_num']!,
+      receiverNUM: lastNine,
+    );
+    if (receiverUUID == null) {
+      // محاولة البحث بطريقة بديلة
+      receiverUUID = await dbHelper.queryreceiverUUID_by_serderUUID(
+        senderNUM: lastNine,
+        receiverNUM: senderData['phone_num']!,
+      );
+
+    }
+    if (receiverUUID == null) {
+      // محاولة البحث بطريقة بديلة
+      receiverUUID = await findDeviceUuid(lastNine);
+      if (receiverUUID == null) {
+        throw Exception('فشل العثور على UUID بعد البحث');
+      }
+    }
+    return {
+      'senderUUID': senderData['uuid'],
+      'senderNUM': senderData['phone_num'],
+      'receiverUUID': receiverUUID,
+    };
+  }
+
+  /// دالة لإعداد مفتاح التشفير (المفتاح المشترك) سواء عبر الاستعلام المحلي أو عبر تبادل المفاتيح مع الخادم
+  Future<BigInt> _prepareSharedKey(
+      String senderUUID,
+      String senderNUM,
+      String receiverUUID,
+      String lastNine,
+      ) async {
+    final dbHelper = DatabaseHelper();
+
+    // محاولة الحصول على المفتاح المشترك محلياً
+    String? key = await dbHelper.queryKeysLocally(
+      senderUUID: senderUUID,
+      receiverNUM: lastNine,
+    );
+
+    // في حالة عدم وجود المفتاح، نقوم بتبادل المفاتيح مع الخادم وإنشاء الزوج اللازم
+    if (key == null || key.isEmpty) {
+      key = await dbHelper.queryKeysLocally1(
+        senderNUM:lastNine,
+        receiverNUM: senderNUM,
+      );
+    }
+    if (key == null || key.isEmpty) {
+        final messageController =
+        Provider.of<MessageController>(context, listen: false);
+        final keys = await messageController.getConversationKey(widget.address);
+        if (keys == null ||
+            keys.ownPublicKey.isEmpty ||
+            keys.ownPrivateKey.isEmpty) {
+          throw Exception('فشل في توليد مفاتيح التشفير');
+        }
+
+        // تبادل المفاتيح مع الخادم
+        await _exchangeKeysWithServer(senderUUID, receiverUUID, keys, widget.address);
+
+        // توليد زوج المفاتيح وحساب السر المشترك
+        final keyPair = DiffieHellmanHelper.generateKeyPair();
+        final myPrivateKey = keyPair.privateKey as ECPrivateKey;
+        final peerPublicKey = keyPair.publicKey as ECPublicKey;
+        final sharedSecret = DiffieHellmanHelper.computeSharedSecret(myPrivateKey, peerPublicKey);
+
+        // تخزين المفتاح محلياً وفي الخادم
+        await dbHelper.storeKeysLocally(
+          senderUUID: senderUUID,
+          senderNUM: senderNUM,
+          receiverUUID: receiverUUID,
+          receiverNUM: lastNine,
+          sharedSecret: sharedSecret,
+        );
+        await _storeKeysToServer(senderUUID, senderNUM, receiverUUID, lastNine, sharedSecret);
+
+        return BigInt.parse(sharedSecret.toString());
+      } else {
+        // إذا كان المفتاح موجوداً محلياً، نقوم باستخدامه
+        return BigInt.parse(key);
+      }
+    }
+
+
+  /// دالة لتبادل المفاتيح مع الخادم والحصول على المفتاح العام الخاص بالجهة المستلمة
+  Future<void> _exchangeKeysWithServer(
+      String senderUUID,
+      String receiverUUID,
+      dynamic keys,
+      String targetPhone,
+      ) async {
+    final response = await http.post(
+      Uri.parse('https://political-thoracic-spatula.glitch.me/api/exchange-keys'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'senderUUID': senderUUID,
+        'receiverUUID': receiverUUID,
+        'senderPublicKey': keys.ownPublicKey,
+        'targetPhone': targetPhone,
+      }),
+    ).timeout(const Duration(seconds: 10));
+
+    if (response.statusCode != 200) {
+      print('فشل تبادل المفاتيح. رمز الحالة: ${response.statusCode}');
+      print('رد الخادم: ${response.body}');
+      throw Exception('فشل تبادل المفاتيح مع الخادم');
+    }
+
+    final exchangeData = jsonDecode(response.body);
+    if (exchangeData['targetPublicKey'] == null) {
+      throw Exception('لم يتم استلام المفتاح العام من الخادم');
+    }
+  }
+
+  /// دالة لتخزين المفاتيح على الخادم
+  Future<void> _storeKeysToServer(
+      String senderUUID,
+      String senderNUM,
+      String receiverUUID,
+      String receiverNUM,
+      dynamic sharedSecret,
+      ) async {
+    final storeResponse = await http.post(
+      Uri.parse('https://political-thoracic-spatula.glitch.me/api/store-keys'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'senderUUID': senderUUID,
+        'senderNUM': senderNUM,
+        'receiverUUID': receiverUUID,
+        'receiverNUM': receiverNUM,
+        'sharedSecret': sharedSecret.toString()
+      }),
+    ).timeout(const Duration(seconds: 10));
+
+    if (storeResponse.statusCode != 200) {
+      print('فشل حفظ المفاتيح. رمز الحالة: ${storeResponse.statusCode}');
+      print('رد الخادم: ${storeResponse.body}');
+      throw Exception('فشل تبادل المفاتيح مع الخادم');
+    }
+
+    final storeData = jsonDecode(storeResponse.body);
+    if (storeData['success'] != true) {
+      throw Exception('فشل في تخزين المفاتيح على الخادم');
+    }
+  }
+
+  /// دالة لتشفير الرسالة وإرسالها عبر SMS وتسجيلها
+  Future<void> _processAndSendMessage(
+      String plainText,
+      BigInt secret,
+      MessageController messageController,
+      String address,
+      ) async {
+    final encryptedMessage = DiffieHellmanHelper.encryptMessage(plainText, secret);
+    await messageController.sendEncryptedMessage(encryptedMessage, plainText, address);
+  }
+
+  /// دالة لتحديث واجهة المستخدم بإضافة الرسالة الجديدة
+  void _updateUIWithNewMessage(String address, String content) async{
+    Message newMessage = Message(
+      sender: address,
+      content: content,
+      timestamp: DateTime.now(),
+      isMe: true,
+      isEncrypted: true,
+    );
+    setState(() {
+      _messages.add(newMessage);
+      _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    });
+      // await _loadMessages();
+  }
+
+  /// دالة لتحريك الـ Scroll إلى نهاية القائمة
+  void _scrollToBottom() {
+    WidgetsBinding.instance?.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
 
 
   Future<void> _makePhoneCall(String phoneNumber) async {

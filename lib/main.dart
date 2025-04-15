@@ -79,36 +79,3 @@ class MyApp extends StatelessWidget {
     );
   }
 }
-// void main() async {
-//   WidgetsFlutterBinding.ensureInitialized();
-//   runApp(
-//     MultiProvider(
-//       providers: [
-//         ChangeNotifierProvider(create: (_) => FirstLaunchManager()),
-//         ChangeNotifierProvider(create: (_) => MessageController()..initDatabases()),
-//       ],
-//       child: MyApp(),
-//     ),
-//   );
-// }
-//
-// class MyApp extends StatelessWidget {
-//   @override
-//   Widget build(BuildContext context) {
-//     return MaterialApp(
-//       title: 'Secure Messenger',
-//       theme: ThemeData(primarySwatch: Colors.blue),
-//       initialRoute: '/',
-//       routes: {
-//         '/': (context) => Consumer<FirstLaunchManager>(
-//           builder: (context, launchManager, child) {
-//             return launchManager.isFirstLaunch
-//                 ? RegistrationScreen()
-//                 : ConversationsScreen();
-//           },
-//         ),
-//         '/home': (context) => ConversationsScreen(),
-//       },
-//     );
-//   }
-// }

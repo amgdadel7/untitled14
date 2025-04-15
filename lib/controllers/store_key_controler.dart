@@ -33,6 +33,22 @@ class DatabaseHelper {
         ? BigInt.parse(result.first['sharedSecret'] as String)
         : null;
   }
+  Future<BigInt?> getSharedSecret1({
+    required String senderNUM,
+    required String receiverNUM,
+  }) async {
+    final db = await database;
+    final List<Map<String, dynamic>> result = await db.query(
+      'key_info',
+      columns: ['sharedSecret'],
+      where: 'senderNUM = ? AND receiverNUM = ?',
+      whereArgs: [senderNUM, receiverNUM],
+    );
+    print("filteredMessages1${result.first['sharedSecret']}");
+    return result.isNotEmpty
+        ? BigInt.parse(result.first['sharedSecret'] as String)
+        : null;
+  }
   Future<void> onCreate(Database db, int version) async {
     await db.execute('''
     CREATE TABLE IF NOT EXISTS key_info (
